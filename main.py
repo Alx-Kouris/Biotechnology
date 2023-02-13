@@ -2,8 +2,6 @@ import os
 import pandas as pd
 import sqlite3
 
-directories = ['./MOUSE BRAIN PROTEOME HRMS']
-
 prefix = "mouse_brain_-_"
 suffix = "_7_weeks"
 
@@ -48,6 +46,21 @@ def table_exists(connection, table_name):
     return result.fetchone()[0] > 0
 
 
+def extract_mouse_protein(sentence):
+    for word in sentence.split(" "):
+        if "_MOUSE" not in word:
+            continue
+        return string_between_brackets(word)
+
+
+def string_between_brackets(word):
+    return word[word.find("[") + 1:word.find("]")]
+
+
+def add_identifier_column(dataframe, column):
+    dataframe['protein_identifier'] = dataframe[column].apply(lambda x: extract_mouse_protein(x))
+
+
 def clean_hrms_descriptions(dataframe):
     dataframe['description'] = dataframe['description'].apply(lambda x: remove_starting_from(x, "OS="))
 
@@ -57,9 +70,12 @@ def number_of_entries(connection, table_name):
     return result.fetchone()[0]
 
 
-def unique_proteins_of_table(connection, table_name, print_unique_info):
+def unique_proteins_of_table(connection, table_name, part="", print_unique_info=False):
     unique_accessions = []
-    res = connection.execute(f"SELECT DISTINCT accession FROM {table_name}")
+    query = f"SELECT protein_identifier FROM {table_name} GROUP BY protein_identifier HAVING " + (
+        f"brain_part='{part}' AND" if len(part) > 0 else "") + " COUNT(*) == 1"
+
+    res = connection.execute(query)
 
     for entry in res.fetchall():
         accession_id = entry[0]
@@ -70,7 +86,6 @@ def unique_proteins_of_table(connection, table_name, print_unique_info):
             for protein in res2.fetchall():
                 print(f"Found unique protein {accession_id} ({protein[0]}) in {protein[1]} with coverage={protein[2]}")
 
-    print(f"We have {len(unique_accessions)} unique accessions")
     return unique_accessions
 
 
@@ -93,6 +108,12 @@ def annotate_dataframes(dataframes_to_annotate, gene_ontology_df, dataframes_acc
             df.loc[updated, 'cellular_component'] = row['Gene Ontology (cellular component)']
 
 
+def cleanup_column_names(dataframe):
+    dataframe.columns = [
+        name.replace('#', '').strip().replace('[', '').replace(']', '').replace(' ', '_').replace('.', '').lower()
+        for name in dataframe.keys()]
+
+
 def open_files_from_directory(directory):
     """
     Opens any excel files in the directory and returns DataFrames for each file
@@ -106,36 +127,118 @@ def open_files_from_directory(directory):
         brain_part = remove_starting_from(file.lower().removeprefix(directory.lower() + "/" + prefix), suffix)
         df = pd.read_excel(file)
         df['brain_part'] = brain_part
-        df.columns = [
-            name.replace('#', '').strip().replace('[', '').replace(']', '').replace(' ', '_').replace('.', '').lower()
-            for name in df.keys()]
+        cleanup_column_names(dataframe=df)
         dataframes.append(df)
 
     return dataframes
 
 
-hrms = open_files_from_directory(directories[0])
-
-# Clean description column
-for brain_df in hrms:
-    clean_hrms_descriptions(brain_df)
-
-db_con = sqlite3.connect("biotechnology.db")
+###################################################################
+#
+# LOAD GENE ONTOLOGY
+#
+###################################################################
 
 gene_ontology = pd.read_excel("uniprot-gene-ontology.xlsx")
 
-annotate_dataframes(dataframes_to_annotate=hrms,
-                    gene_ontology_df=gene_ontology,
-                    dataframes_accession_id="accession",
-                    gene_ontology_accession_id="Entry")
 
-if not table_exists(connection=db_con, table_name="hrms"):
+# Open SQL connection
+db_con = sqlite3.connect("biotechnology.db")
+
+###################################################################
+#
+# HRMS
+#
+###################################################################
+
+hrms_table_name = "hrms"
+
+if not table_exists(connection=db_con, table_name=hrms_table_name):
+    hrms = open_files_from_directory('./MOUSE BRAIN PROTEOME HRMS')
     for brain_df in hrms:
-        brain_df.to_sql(name='hrms', if_exists='append', con=db_con, index=False)
+        add_identifier_column(dataframe=brain_df, column='description')
+        clean_hrms_descriptions(brain_df)
+
+    # Annotate with gene ontology before storing in database
+    annotate_dataframes(dataframes_to_annotate=hrms,
+                        gene_ontology_df=gene_ontology,
+                        dataframes_accession_id="protein_identifier",
+                        gene_ontology_accession_id="Entry Name")
+
+    for brain_df in hrms:
+        brain_df.to_sql(name=hrms_table_name, if_exists='append', con=db_con, index=False)
         db_con.commit()
 
-print(f"Table HRMS has {number_of_entries(connection=db_con, table_name='hrms')} entries")
+print(f"Table {hrms_table_name} has {number_of_entries(connection=db_con, table_name=hrms_table_name)} entries")
 
-unique_proteins_of_table(db_con, "hrms", False)
+unique_proteins_of_table(db_con, hrms_table_name)
+
+###################################################################
+#
+# TARASLIA
+#
+###################################################################
+
+match_parts = {
+    "OB": "olfactory_balb",
+    "ΟΒ": "olfactory_balb",
+    "HT": "hipothalamus",
+    "MD": "medulla",
+    "MB": "mid_brain",
+    "OD": "olfactory_balb",
+    "HC": "hipocampus",
+    "CB": "cerebellum",
+    "CC": "cortex"
+}
+
+
+def normalize_taraslia_dataframe(taraslia_df):
+    taraslia_df.rename(columns={"accession_name": "protein_identifier",
+                                "protein_name": "description",
+                                "protein_mw": "mw_kda",
+                                "pi-value": "calc_pi"}, inplace=True)
+    taraslia_df['brain_part'] = taraslia_df['brain_part'].apply(lambda x: x.strip().upper().split(", "))
+    taraslia_df = taraslia_df.explode('brain_part', ignore_index=True)
+    taraslia_df['brain_part'] = taraslia_df['brain_part'].apply(lambda x: match_parts[x.strip()])
+    return taraslia_df
+
+
+taraslia_table_name = "taraslia"
+
+if not table_exists(connection=db_con, table_name=taraslia_table_name):
+    # Open only the first file
+    taraslia = pd.read_excel("./MOUSE BRAIN 2DGE PROTEINS/TARASLIA et al TABLE 1.xls", skiprows=[0])
+
+    # Cleanup
+    cleanup_column_names(taraslia)
+    taraslia = normalize_taraslia_dataframe(taraslia)
+
+    # Annotate with gene ontology before storing in database
+    annotate_dataframes(dataframes_to_annotate=[taraslia],
+                        gene_ontology_df=gene_ontology,
+                        dataframes_accession_id="protein_identifier",
+                        gene_ontology_accession_id="Entry Name")
+
+    taraslia.to_sql(name=taraslia_table_name, if_exists='append', con=db_con, index=False)
+
+
+print(f"Table {taraslia_table_name} has {number_of_entries(connection=db_con, table_name=taraslia_table_name)} entries")
+
+unique_proteins_of_table(connection=db_con, table_name=taraslia_table_name)
+
+###################################################################
+#
+# STATISTICS
+#
+###################################################################
+
+brain_parts = ["olfactory_balb", "hipothalamus", "medulla", "mid_brain", "hipocampus", "cerebellum", "cortex"]
+studies = [hrms_table_name, taraslia_table_name]
+
+for study in studies:
+    for brain_part in brain_parts:
+        print(f"{brain_part.upper()} in study {study.upper()} has "
+              f"{len(unique_proteins_of_table(connection=db_con, table_name=study, part=brain_part))} unique proteins.")
+
 
 db_con.close()
