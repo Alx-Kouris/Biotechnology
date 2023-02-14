@@ -89,7 +89,8 @@ def unique_proteins_of_table(connection, table_name, part="", print_unique_info=
     return unique_accessions
 
 
-def annotate_dataframes(dataframes_to_annotate, gene_ontology_df, dataframes_accession_id, gene_ontology_accession_id, add_protein_identifier = False):
+def annotate_dataframes(dataframes_to_annotate, gene_ontology_df, dataframes_accession_id, gene_ontology_accession_id,
+                        add_protein_identifier=False):
     """
     Annotate dataframes with extra columns found in gene_ontology based on the column name for matching between dataframes
     :param dataframes_to_annotate: list of dataframes to annotate
@@ -228,19 +229,9 @@ unique_proteins_of_table(connection=db_con, table_name=taraslia_table_name)
 
 ###################################################################
 #
-# STATISTICS
+# JUNG
 #
 ###################################################################
-
-brain_parts = ["olfactory_balb", "hipothalamus", "medulla", "mid_brain", "hipocampus", "cerebellum", "cortex"]
-studies = [hrms_table_name, taraslia_table_name]
-
-for study in studies:
-    for brain_part in brain_parts:
-        print(f"{brain_part.upper()} in study {study.upper()} has "
-              f"{len(unique_proteins_of_table(connection=db_con, table_name=study, part=brain_part))} unique proteins.")
-
-#####################################################################################################################
 
 jung_match_parts = {
     "Olfactory": "olfactory_balb",
@@ -268,7 +259,7 @@ if not table_exists(connection=db_con, table_name=jung_table_name):
     jung_df = pd.DataFrame()
     for key in jung_match_parts.keys():
         print(f"Reading sheet {key} from Jung")
-        jung = pd.read_excel("/home/kourisa/Downloads/Project/Mouse brain 2,3/Jung et al 2017/mcp.M116.061440-7.xlsx",
+        jung = pd.read_excel("./JUNG/jung.xlsx",
                              key, skiprows=[0, 1])
         jung = jung.drop_duplicates(subset='Gene ID')  # keep a gene only once from each sample
         jung = jung.drop(columns=['Sample', 'Recovered Sequence ( under score delimited)'])
@@ -278,8 +269,8 @@ if not table_exists(connection=db_con, table_name=jung_table_name):
         jung_df = pd.concat([jung_df, jung])
 
     jung_df.reset_index()
-    jung_df.drop(columns=['index'])
-    jung_df = jung_df.drop_duplicates(subset=['Gene ID', 'brain_part'])  # keep a gene only once from each sample
+    jung_df.drop(columns=['index'], inplace=True)
+    jung_df = jung_df.drop_duplicates(subset=['Gene ID', 'brain_part'])
     print(jung_df['brain_part'].value_counts())
     cleanup_column_names(jung_df)
     jung_df.rename(columns={"full_name": "description"}, inplace=True)
@@ -292,5 +283,82 @@ if not table_exists(connection=db_con, table_name=jung_table_name):
                         add_protein_identifier=True)
 
     jung_df.to_sql(name=jung_table_name, if_exists='append', con=db_con, index=False)
+
+print(f"Table {jung_table_name} has {number_of_entries(connection=db_con, table_name=jung_table_name)} entries")
+
+unique_proteins_of_table(connection=db_con, table_name=jung_table_name)
+
+###################################################################
+#
+# SHARMA
+#
+###################################################################
+
+sharma_table_name = "sharma"
+
+
+def sharma_protein_identifiers(dataframe_to_annotate, gene_ontology_df):
+    dataframe_to_annotate['protein_identifier'] = ""
+    for index, row in dataframe_to_annotate.iterrows():
+        for protein_id in row['majority_protein_ids'].split(";"):
+            if "-" in protein_id:
+                protein_id = remove_starting_from(protein_id, "-")
+
+            gene_entry = gene_ontology_df.loc[gene_ontology_df['Entry'] == protein_id]
+            if len(gene_entry) > 0:
+                dataframe_to_annotate.loc[index, 'protein_identifier'] = gene_entry['Entry Name'].values[0]
+
+
+def determine_brain_part(dataframe):
+    dataframe['brain_part'] = ""
+    for index, row in dataframe.iterrows():
+        for column_name in dataframe.columns.values:
+            if row[column_name] == "+":
+                brain_part = "cortex" if column_name == "motor_cortex" or column_name == "prefrontal_cortex" else column_name
+                dataframe.loc[index, 'brain_part'] += brain_part + ","
+
+
+if not table_exists(connection=db_con, table_name=sharma_table_name):
+    sharma = pd.read_excel("./SHARMA/sharma.xlsx", skiprows=[0])
+    cleanup_column_names(sharma)
+    sharma.rename(columns={"protein_names": "description",
+                           "sequence_coverage_%": "coverage",
+                           "mol_weight_kda": "mw_kda",
+                           "olfactory_bulb": "olfactory_balb",
+                           "hippocampus": "hipocampus"}, inplace=True)
+    determine_brain_part(sharma)
+    sharma['brain_part'] = sharma['brain_part'].apply(lambda x: x[:-1].split(",") if x.endswith(",") else x.split(","))
+    sharma = sharma.explode('brain_part', ignore_index=True)
+    sharma_protein_identifiers(sharma, gene_ontology)
+
+    # Annotate with gene ontology before storing in database
+    annotate_dataframes(dataframes_to_annotate=[sharma],
+                        gene_ontology_df=gene_ontology,
+                        dataframes_accession_id="protein_identifier",
+                        gene_ontology_accession_id="Entry Name",
+                        add_protein_identifier=True)
+
+    sharma.drop(columns=['brainstem', 'cerebellum',
+                         'corpus_callosum', 'motor_cortex', 'olfactory_balb', 'optic_nerve',
+                         'prefrontal_cortex', 'striatum', 'thalamus', 'hipocampus'], inplace=True)
+    sharma.to_sql(name=sharma_table_name, if_exists='append', con=db_con, index=False)
+
+print(f"Table {sharma_table_name} has {number_of_entries(connection=db_con, table_name=sharma_table_name)} entries")
+
+unique_proteins_of_table(connection=db_con, table_name=sharma_table_name)
+
+###################################################################
+#
+# STATISTICS
+#
+###################################################################
+
+brain_parts = ["olfactory_balb", "hipothalamus", "medulla", "mid_brain", "hipocampus", "cerebellum", "cortex"]
+studies = [hrms_table_name, taraslia_table_name, jung_table_name, sharma_table_name]
+
+for study in studies:
+    for brain_part_name in brain_parts:
+        print(f"{brain_part_name.upper()} in study {study.upper()} has "
+              f"{len(unique_proteins_of_table(connection=db_con, table_name=study, part=brain_part_name))} unique proteins.")
 
 db_con.close()
