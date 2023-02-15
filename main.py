@@ -1,6 +1,8 @@
 import os
 import pandas as pd
 import sqlite3
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 prefix = "mouse_brain_-_"
 suffix = "_7_weeks"
@@ -68,6 +70,31 @@ def clean_hrms_descriptions(dataframe):
 def number_of_entries(connection, table_name):
     result = connection.execute(f"SELECT count(*) FROM {table_name}")
     return result.fetchone()[0]
+
+
+def brain_parts_of_table(connection, table_name):
+    brain_parts = []
+    query = f"SELECT DISTINCT brain_part FROM {table_name}"
+    res = connection.execute(query)
+    for part in res.fetchall():
+        if len(part[0]) == 0:
+            continue
+        if part[0] not in brain_parts:
+            brain_parts.append(part[0])
+
+    return brain_parts
+
+
+def common_proteins_of_table(connection, table_name, part=""):
+    common_proteins = []
+    query = f"SELECT DISTINCT protein_identifier FROM {table_name} GROUP BY protein_identifier HAVING " + (
+        f"brain_part='{part}' AND" if len(part) > 0 else "") + " COUNT(*) > 1"
+
+    res = connection.execute(query)
+    for entry in res.fetchall():
+        common_proteins.append(entry[0])
+
+    return common_proteins
 
 
 def unique_proteins_of_table(connection, table_name, part="", print_unique_info=False):
@@ -349,16 +376,53 @@ unique_proteins_of_table(connection=db_con, table_name=sharma_table_name)
 
 ###################################################################
 #
-# STATISTICS
+# PLOTS
 #
 ###################################################################
-
-brain_parts = ["olfactory_balb", "hipothalamus", "medulla", "mid_brain", "hipocampus", "cerebellum", "cortex"]
 studies = [hrms_table_name, taraslia_table_name, jung_table_name, sharma_table_name]
 
+all_reported_brain_parts = []
 for study in studies:
-    for brain_part_name in brain_parts:
-        print(f"{brain_part_name.upper()} in study {study.upper()} has "
-              f"{len(unique_proteins_of_table(connection=db_con, table_name=study, part=brain_part_name))} unique proteins.")
+    reported_brain_parts = brain_parts_of_table(db_con, study)
+    for bp in reported_brain_parts:
+        if len(bp[0]) == 0:
+            continue
+        if bp not in all_reported_brain_parts:
+            all_reported_brain_parts.append(bp)
+
+
+# Unique|Common proteins per brain_part per study
+for study in studies:
+    unique_proteins_per_part = []
+    common_proteins_per_part = []
+
+    for brain_part in all_reported_brain_parts:
+        unique_proteins_per_part.append(len(unique_proteins_of_table(connection=db_con, table_name=study, part=brain_part)))
+        common_proteins_per_part.append(len(common_proteins_of_table(connection=db_con, table_name=study, part=brain_part)))
+
+    plt.bar(all_reported_brain_parts, unique_proteins_per_part, color='r')
+    plt.bar(all_reported_brain_parts, common_proteins_per_part, bottom=unique_proteins_per_part, color='b')
+    plt.xlabel("Brain Parts")
+    plt.ylabel("# Proteins")
+    plt.legend(["Unique", "Common"])
+    plt.xticks(rotation='vertical')
+    plt.title(study.upper())
+    plt.show()
+
+# Number of common proteins with previous studies
+common_proteins_with_studies = []
+for study in studies:
+    if study == hrms_table_name:
+        continue
+
+    query = f"SELECT COUNT(protein_identifier) FROM {hrms_table_name} WHERE protein_identifier in (SELECT protein_identifier FROM {study})"
+    res = db_con.execute(query)
+    common_proteins_with_studies.append(res.fetchone()[0])
+
+plt.bar(studies[1:], common_proteins_with_studies, color='maroon')
+plt.xlabel("Previous studies")
+plt.ylabel("# Common Proteins")
+plt.title("Common Proteins with previous studies")
+plt.show()
 
 db_con.close()
