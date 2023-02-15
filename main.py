@@ -419,6 +419,20 @@ for study in studies:
     res = db_con.execute(query)
     common_proteins_with_studies.append(res.fetchone()[0])
 
+    common_proteins_per_part = []
+    for brain_part in all_reported_brain_parts:
+        part_query = f"SELECT COUNT(protein_identifier) FROM {hrms_table_name} WHERE brain_part='{brain_part}' AND protein_identifier in (SELECT protein_identifier FROM {study} WHERE brain_part='{brain_part}')"
+        res = db_con.execute(part_query)
+        common_proteins_per_part.append(res.fetchone()[0])
+
+    plt.bar(all_reported_brain_parts, common_proteins_per_part, color='r')
+    plt.xlabel("Brain Parts")
+    plt.ylabel("# Common Proteins")
+    plt.xticks(rotation='vertical')
+    plt.title("HRMS vs " + study.upper())
+    plt.show()
+
+
 plt.bar(studies[1:], common_proteins_with_studies, color='maroon')
 plt.xlabel("Previous studies")
 plt.ylabel("# Common Proteins")
